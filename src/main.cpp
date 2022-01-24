@@ -29,7 +29,6 @@ enum class Periphs {
 struct TimeContainerMinimal {
 	uint8_t hours;
 	uint8_t minutes;
-	uint8_t seconds;
 };
 
 struct EepromData{
@@ -37,13 +36,16 @@ struct EepromData{
 	uint8_t pumpOffPeriod;
 	TimeContainerMinimal lampOnTime;
 	TimeContainerMinimal lampOffTime;
-	TimeContainerMinimal nextPumpSwitchTime;
 };
 
 static constexpr char kSWVersion[]{"0.3"};
 static constexpr unsigned long kDisplayUpdateTime{300};
 static constexpr unsigned long kRTCReadTime{100};
 static constexpr uint8_t kMaxPumpPeriod{60};
+
+// АССЕРТЫ 
+static_assert(kMaxPumpPeriod < 61, "Максимальная длительность цикла - 60 минут");
+//
 
 static constexpr uint8_t kRedLedPin{5};
 static constexpr uint8_t kGreenLedPin{7};
@@ -59,7 +61,9 @@ Adafruit_SSD1306 display(7);
 EncButton<EB_CALLBACK, kEncS1Pin, kEncS2Pin ,kEncKeyPin> encoder(INPUT_PULLUP);
 
 RTC_DS3231 rtc;
-TimeContainer nextPumpSwitchTime{0,0};
+TimeContainer pumpSwitchStartTime{0,0};
+TimeContainer pumpSwitchStopTime{0,0};
+
 TimeContainer lampOnTime{0,0};
 TimeContainer lampOffTime{0,0};
 
@@ -137,7 +141,7 @@ void encoderInit()
 					}
 					break;
 				case DisplayModes::SET_LAMPON_TIME:
-					if (lampOnTime.hour() < 23) {
+					if (lampOnTime.hour() <= 12) {
 						lampOnTime.setTime(lampOnTime.hour() + 1, lampOnTime.minute(), lampOnTime.seconds());
 					} else {
 						lampOnTime.setTime(0, lampOnTime.minute(), lampOnTime.seconds());
@@ -147,7 +151,7 @@ void encoderInit()
 					if (lampOffTime.hour() < 23) {
 						lampOffTime.setTime(lampOffTime.hour() + 1, lampOffTime.minute(), lampOffTime.seconds());
 					} else {
-						lampOffTime.setTime(0, lampOffTime.minute(), lampOffTime.seconds());
+						lampOffTime.setTime(12, lampOffTime.minute(), lampOffTime.seconds());
 					}
 					break;
 				case DisplayModes::SET_PUMP_TIME:
@@ -293,21 +297,24 @@ void checkTime()
 	TimeContainer currentTime{now.hour(), now.minute(), now.second()};
 
 	// Проверим тайминги для насоса
-	if (currentTime == nextPumpSwitchTime) {
-		if (pumpState == true) {
-			nextPumpSwitchTime.addTime(pumpOffPeriod);
-			switchPeriph(Periphs::PUMP, false);
-		} else {
-			nextPumpSwitchTime.addTime(pumpOnPeriod);
+	if (!(currentTime > pumpSwitchStartTime && currentTime < pumpSwitchStopTime)) {
+		// Если мы вышли за диапазон работы - меняем режим
+		pumpSwitchStartTime = pumpSwitchStopTime;
+
+		if (pumpState) {
+			pumpSwitchStopTime.addTime(pumpOffPeriod);
 			switchPeriph(Periphs::PUMP, true);
-			}
+		} else {
+			pumpSwitchStopTime.addTime(pumpOnPeriod);
+			switchPeriph(Periphs::PUMP, false);
 		}
+	}
 
 	// Проверим тайминги для лампы
-	if (currentTime == lampOnTime) {
-		switchPeriph(Periphs::LAMP, true);
-	} else if (currentTime == lampOffTime) {
+	if (currentTime < lampOnTime || currentTime > lampOffTime) {
 		switchPeriph(Periphs::LAMP, false);
+	} else {
+		switchPeriph(Periphs::LAMP, true);
 	}
 }
 
@@ -317,16 +324,14 @@ void eepromRead()
 	eeprom_read_block(static_cast<void*>(&data), 0, sizeof(data));
 	pumpOnPeriod = data.pumpOnPeriod;
 	pumpOffPeriod = data.pumpOffPeriod;
-	lampOnTime.setTime(data.lampOnTime.hours, data.lampOnTime.minutes, data.lampOnTime.seconds);
-	lampOffTime.setTime(data.lampOffTime.hours, data.lampOffTime.minutes, data.lampOffTime.seconds);
-	nextPumpSwitchTime.setTime(data.nextPumpSwitchTime.hours, data.nextPumpSwitchTime.minutes, data.nextPumpSwitchTime.seconds);
+	lampOnTime.setTime(data.lampOnTime.hours, data.lampOnTime.minutes, 0);
+	lampOffTime.setTime(data.lampOffTime.hours, data.lampOffTime.minutes, 0);
+	
 }
 
 void eepromWrite()
 {
-	EepromData data{pumpOnPeriod, pumpOffPeriod, {lampOnTime.hour(), lampOnTime.minute(), lampOnTime.seconds()},
-		{lampOffTime.hour(), lampOffTime.minute(), lampOffTime.seconds()}, {nextPumpSwitchTime.hour(), nextPumpSwitchTime.minute(), nextPumpSwitchTime.seconds()}};
-	eeprom_update_block(static_cast<void*>(&data), 0, sizeof(data));
+
 }
 
 void displayProcedure()
@@ -465,12 +470,13 @@ void displayProcedure()
 	}		
 }
 
-void firstInit()
+void firstInit() // Вызывать один раз для того, чтобы перезаписать мусор в EEPROM
 {
 	rtc.adjust(DateTime(2022, 1, 22, 16, 35, 0));
-	nextPumpSwitchTime.setTime(10, 10, 0);
 	lampOnTime.setTime(10, 10, 0);
 	lampOffTime.setTime(10, 10, 0);
+	pumpOnPeriod = 10;
+	pumpOffPeriod = 10;
 }
 
 void setup()
@@ -483,15 +489,13 @@ void setup()
 	eepromRead();
 	switchPeriph(Periphs::GREENLED, true);
 	displayMode = DisplayModes::TIME;
+	
+	DateTime now = rtc.now();
+	TimeContainer currentTime{now.hour(), now.minute(), now.second()};
 
-	//firstInit();
-
-	// Начнем цикл работы насоса с положения выключено
-	// DateTime now = rtc.now();
-	// TimeContainer currentTime{now.hour(), now.minute(), now.second()};
-	// nextPumpSwitchTime = currentTime;
-	// nextPumpSwitchTime.addTime(pumpOffPeriod);
-
+	pumpSwitchStartTime = currentTime;
+	pumpSwitchStopTime = currentTime;
+	pumpSwitchStopTime.addTime(pumpOffPeriod);
 }
 
 void loop()
