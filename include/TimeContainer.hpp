@@ -25,17 +25,17 @@ public:
 
 	}
 
-	bool operator == (const TimeContainer &cont1)
+	bool operator == (const TimeContainer &cont1) const&
 	{
 		return ((_hours == cont1._hours) && (_minutes == cont1._minutes) && (_seconds == cont1._seconds));
 	}
 
-	bool operator != (const TimeContainer &cont1)
+	bool operator != (const TimeContainer &cont1) const&
 	{
 		return ((_hours != cont1._hours) || (_minutes != cont1._minutes) || (_seconds != cont1._seconds));
 	}
 
-	bool operator < (const TimeContainer &cont1)
+	bool operator < (const TimeContainer &cont1) const&
 	{
 		uint8_t hour1{0};
 		uint8_t hour2{0};
@@ -70,7 +70,7 @@ public:
 		}
 	}
 
-	bool operator > (const TimeContainer &cont1)
+	bool operator > (const TimeContainer &cont1) const&
 	{
 		uint8_t hour1{0};
 		uint8_t hour2{0};
@@ -112,24 +112,24 @@ public:
 	    _seconds = aSeconds;
 	}
 
-	void getTime(uint8_t &aHours, uint8_t &aMinutes, uint8_t &aSeconds)
+	void getTime(uint8_t &aHours, uint8_t &aMinutes, uint8_t &aSeconds) 
 	{
 		aHours = _hours;
 		aMinutes = _minutes;
 		aSeconds = _seconds;
 	}
 
-	uint8_t hour()
+	uint8_t hour() const
 	{
 		return _hours;
 	}
 
-	uint8_t minute()
+	uint8_t minute() const
 	{
 		return _minutes;
 	}
 
-	uint8_t seconds()
+	uint8_t seconds() const
 	{
 		return _seconds;
 	}
