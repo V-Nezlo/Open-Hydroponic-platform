@@ -6,6 +6,10 @@
 #include <RTClib.h>
 #include "TimeContainer.hpp"
 
+/*
+Место для большого комментария
+*/
+
 enum class DisplayModes : uint8_t {
 	TIME               = 1,
 	PH_PPM             = 2,
@@ -26,6 +30,12 @@ enum class Periphs {
 	GREENLED
 };
 
+enum class ErrorTypes {
+	LOW_WATERLEVEL,
+	LEAK,
+	POWEROFF
+};
+
 struct TimeContainerMinimal {
 	uint8_t hours;
 	uint8_t minutes;
@@ -38,10 +48,11 @@ struct EepromData{
 	TimeContainerMinimal lampOffTime;
 };
 
-static constexpr char kSWVersion[]{"0.3"};
-static constexpr unsigned long kDisplayUpdateTime{300};
-static constexpr unsigned long kRTCReadTime{100};
-static constexpr uint8_t kMaxPumpPeriod{60};
+static constexpr char kSWVersion[]{"0.4"}; // Текущая версия прошивки
+static constexpr unsigned long kDisplayUpdateTime{300}; // Время обновления информации на экране
+static constexpr unsigned long kRTCReadTime{300}; // Период опроса RTC
+static constexpr uint8_t kMaxPumpPeriod{60}; // Максимальная длительность периода залива-отлива
+static constexpr uint8_t kMaxTimeForFullFlood{2}; // Максимальная длительность работы насоса для полного затопления камеры
 
 // АССЕРТЫ 
 static_assert(kMaxPumpPeriod < 61, "Максимальная длительность цикла - 60 минут");
@@ -52,6 +63,7 @@ static constexpr uint8_t kGreenLedPin{7};
 static constexpr uint8_t kBlueLedPin{6};
 static constexpr uint8_t kPumpPin{12};
 static constexpr uint8_t kLampPin{13};
+static constexpr uint8_t kFloatLevelPin{11};
 
 static constexpr uint8_t kEncKeyPin{4};
 static constexpr uint8_t kEncS2Pin{2};
@@ -63,6 +75,7 @@ EncButton<EB_CALLBACK, kEncS1Pin, kEncS2Pin ,kEncKeyPin> encoder(INPUT_PULLUP);
 RTC_DS3231 rtc;
 TimeContainer pumpSwitchStartTime{0,0};
 TimeContainer pumpSwitchStopTime{0,0};
+TimeContainer pumpNextCheckTime{0, 0};
 
 TimeContainer lampOnTime{0,0};
 TimeContainer lampOffTime{0,0};
@@ -78,6 +91,10 @@ uint16_t currentPPM{0};
 bool pumpState{false};
 bool lampState{false};
 bool modeConf{false};
+
+// Флаги для разных проверок
+bool pumpCheckNeeded{false};
+//
 
 void eepromWrite();
 void eepromRead();
@@ -291,6 +308,21 @@ void switchPeriph(Periphs aPeriph, bool aMode)
 	}
 }
 
+void handleError(ErrorTypes aType)
+{
+	switch (aType) {
+		case ErrorTypes::LOW_WATERLEVEL: // Если емкость не заполнена за нужное время - рубим все, включаем красный светодиод и уходим в вечное ожидание
+			switchPeriph(Periphs::REDLED, true);
+			switchPeriph(Periphs::PUMP, false);
+			switchPeriph(Periphs::LAMP, false);
+			while(true) {} //
+		case ErrorTypes::LEAK: // Если будет датчик протечки - он будет обрабатываться тут
+		break;
+		case ErrorTypes::POWEROFF: // Если будет датчик наличия напряжения - он будет обрабатываться здесь
+		break;
+	}
+}
+
 void checkTime()
 {
 	DateTime now = rtc.now();
@@ -304,9 +336,22 @@ void checkTime()
 		if (pumpState) {
 			pumpSwitchStopTime.addTime(pumpOffPeriod);
 			switchPeriph(Periphs::PUMP, true);
+
+			// Включаем таймер для проверки статуса поплавкого уровня внутри камеры
+			pumpNextCheckTime = currentTime; 
+			pumpNextCheckTime.addTime(kMaxTimeForFullFlood);
+			pumpCheckNeeded = true;
 		} else {
 			pumpSwitchStopTime.addTime(pumpOnPeriod);
 			switchPeriph(Periphs::PUMP, false);
+		}
+	}
+
+	if ((currentTime > pumpNextCheckTime) && pumpCheckNeeded) {
+		if (digitalRead(kFloatLevelPin)) {
+			pumpCheckNeeded = false; // Основная камера затоплена за требуемое время, все в порядке
+		} else {
+			handleError(ErrorTypes::LOW_WATERLEVEL); // Что-то пошло не так
 		}
 	}
 
@@ -331,13 +376,16 @@ void eepromRead()
 
 void eepromWrite()
 {
-
+	EepromData data{pumpOnPeriod, pumpOffPeriod, {lampOnTime.hour(), lampOnTime.minute()}, {lampOffTime.hour(), lampOffTime.minute()}};
+	eeprom_update_block(static_cast<void*>(&data), 0, sizeof(data));
 }
 
 void displayProcedure()
 {
 	String str1;
 	String str2;
+	String str3;
+	String str4;
 	DateTime now = rtc.now();
 
 	switch(displayMode){
@@ -403,11 +451,18 @@ void displayProcedure()
 		case DisplayModes::STATUS:
 			str1 = "Current Ver";
 			str2 = kSWVersion;
+			str3 = "next P switch ";
+			str3 += pumpSwitchStopTime.hour();
+			str3 += ":";
+			str3 += pumpSwitchStopTime.minute();
+
 			display.clearDisplay();
 			display.setCursor(0, 0);
 			display.print(str1);
 			display.setCursor(0, 18);
 			display.print(str2);
+			display.setCursor(0, 24);
+			display.print(str3);
 			display.display();
 			break;
 		case DisplayModes::SET_CUR_TIME:
@@ -478,6 +533,8 @@ void firstInit() // Вызывать один раз для того, чтобы
 	pumpOnPeriod = 10;
 	pumpOffPeriod = 10;
 }
+
+
 
 void setup()
 {

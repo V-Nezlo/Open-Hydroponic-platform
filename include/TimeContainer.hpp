@@ -60,7 +60,7 @@ public:
 				return true;
 			} else if (_minutes > cont1._minutes) {
 				return false;
-			} else if (_minutes = cont1._minutes) {
+			} else if (_minutes == cont1._minutes) {
 				if (_seconds < cont1._seconds) {
 					return true;
 				} else {
@@ -95,7 +95,7 @@ public:
 				return true;
 			} else if (_minutes < cont1._minutes) {
 				return false;
-			} else if (_minutes = cont1._minutes) {
+			} else if (_minutes == cont1._minutes) {
 				if (_seconds > cont1._seconds) {
 					return true;
 				} else {
