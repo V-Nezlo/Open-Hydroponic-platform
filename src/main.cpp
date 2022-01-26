@@ -1,3 +1,19 @@
+/*
+Автор - V-Nezlo
+email: vlladimirka@gmail.com
+Дата создания проекта - 10.12.2021
+
+Фичи, которые возможно будут реализованы:
+- Регулирование мощности насоса не отдельным ШИМ регулятором, а микроконтроллером
+- Добавление второго поплавкого уровня для бака
+- Добавление наблюдателя для контроля над выполнением основной программы
+- Добавление датчиков протечки на узлы, которые в теории могут потечь
+- Добавление зуммера для дополнительной индикации проблем в системе
+- Постоянное сохранение всех параметров системы в FRAM память
+
+и т.д.
+*/
+
 #include <Arduino.h>
 #include <Adafruit_SSD1306.h>
 #include <EncButton.h>
@@ -5,10 +21,6 @@
 #include <EEPROM.h>
 #include <RTClib.h>
 #include "TimeContainer.hpp"
-
-/*
-Место для большого комментария
-*/
 
 enum class DisplayModes : uint8_t {
 	TIME               = 1,
@@ -52,7 +64,7 @@ static constexpr char kSWVersion[]{"0.4"}; // Текущая версия про
 static constexpr unsigned long kDisplayUpdateTime{300}; // Время обновления информации на экране
 static constexpr unsigned long kRTCReadTime{300}; // Период опроса RTC
 static constexpr uint8_t kMaxPumpPeriod{60}; // Максимальная длительность периода залива-отлива
-static constexpr uint8_t kMaxTimeForFullFlood{2}; // Максимальная длительность работы насоса для полного затопления камеры
+static constexpr uint8_t kMaxTimeForFullFlood{1}; // Максимальная длительность работы насоса для полного затопления камеры
 
 // АССЕРТЫ 
 static_assert(kMaxPumpPeriod < 61, "Максимальная длительность цикла - 60 минут");
@@ -106,6 +118,7 @@ void pinInit()
 	pinMode(kGreenLedPin, OUTPUT);
 	pinMode(kPumpPin, OUTPUT);
 	pinMode(kLampPin, OUTPUT);
+	pinMode(kFloatLevelPin, INPUT_PULLUP);
 	
 	// Пины для энкодера инициализируются внутри библиотеки Гайвера
 }
@@ -348,7 +361,7 @@ void checkTime()
 	}
 
 	if ((currentTime > pumpNextCheckTime) && pumpCheckNeeded) {
-		if (digitalRead(kFloatLevelPin)) {
+		if (!digitalRead(kFloatLevelPin)) {
 			pumpCheckNeeded = false; // Основная камера затоплена за требуемое время, все в порядке
 		} else {
 			handleError(ErrorTypes::LOW_WATERLEVEL); // Что-то пошло не так
@@ -371,7 +384,6 @@ void eepromRead()
 	pumpOffPeriod = data.pumpOffPeriod;
 	lampOnTime.setTime(data.lampOnTime.hours, data.lampOnTime.minutes, 0);
 	lampOffTime.setTime(data.lampOffTime.hours, data.lampOffTime.minutes, 0);
-	
 }
 
 void eepromWrite()
