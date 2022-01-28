@@ -3,6 +3,10 @@
 email: vlladimirka@gmail.com
 Дата создания проекта - 10.12.2021
 
+Фичи, которые нужно реализовать:
+ - Концевик на бак, без него во время замены жидности насос может включиться насухую,
+ИЛИ ограничиться остановкой алгоритма по поплавковому уровню внутри бака
+
 Фичи, которые возможно будут реализованы:
 - Регулирование мощности насоса не отдельным ШИМ регулятором, а микроконтроллером
 - Добавление второго поплавкого уровня для бака
@@ -10,6 +14,7 @@ email: vlladimirka@gmail.com
 - Добавление датчиков протечки на узлы, которые в теории могут потечь
 - Добавление зуммера для дополнительной индикации проблем в системе
 - Постоянное сохранение всех параметров системы в FRAM память
+- Перенести работу насоса так же в unixtime
 
 и т.д.
 */
@@ -63,12 +68,8 @@ struct EepromData{
 static constexpr char kSWVersion[]{"0.4"}; // Текущая версия прошивки
 static constexpr unsigned long kDisplayUpdateTime{300}; // Время обновления информации на экране
 static constexpr unsigned long kRTCReadTime{300}; // Период опроса RTC
-static constexpr uint8_t kMaxPumpPeriod{60}; // Максимальная длительность периода залива-отлива
-static constexpr uint8_t kMaxTimeForFullFlood{1}; // Максимальная длительность работы насоса для полного затопления камеры
-
-// АССЕРТЫ 
-static_assert(kMaxPumpPeriod < 61, "Максимальная длительность цикла - 60 минут");
-//
+static constexpr uint8_t kMaxPumpPeriod{60}; // Максимальная длительность периода залива-отливав в минутах
+static constexpr uint8_t kMaxTimeForFullFlood{60}; // Максимальная длительность работы насоса для полного затопления камеры в секундах
 
 static constexpr uint8_t kRedLedPin{5};
 static constexpr uint8_t kGreenLedPin{7};
@@ -85,9 +86,9 @@ Adafruit_SSD1306 display(7);
 EncButton<EB_CALLBACK, kEncS1Pin, kEncS2Pin ,kEncKeyPin> encoder(INPUT_PULLUP);
 
 RTC_DS3231 rtc;
-TimeContainer pumpSwitchStartTime{0,0};
-TimeContainer pumpSwitchStopTime{0,0};
-TimeContainer pumpNextCheckTime{0, 0};
+uint32_t pumpSwitchStartTime{0};
+uint32_t pumpSwitchStopTime{0};
+uint32_t pumpNextCheckTime{0};
 
 TimeContainer lampOnTime{0,0};
 TimeContainer lampOffTime{0,0};
@@ -339,28 +340,28 @@ void handleError(ErrorTypes aType)
 void checkTime()
 {
 	DateTime now = rtc.now();
-	TimeContainer currentTime{now.hour(), now.minute(), now.second()};
+	TimeContainer currentTime{now.hour(), now.minute(), now.second()}; // Остается для работы насоса по часам
+	uint32_t currentUnixTime{now.unixtime()};                          // Добавляется для правильного подсчета интервалов
 
 	// Проверим тайминги для насоса
-	if (!(currentTime > pumpSwitchStartTime && currentTime < pumpSwitchStopTime)) {
+	if (!(currentUnixTime > pumpSwitchStartTime && currentUnixTime < pumpSwitchStopTime)) {
 		// Если мы вышли за диапазон работы - меняем режим
 		pumpSwitchStartTime = pumpSwitchStopTime;
 
 		if (pumpState) {
-			pumpSwitchStopTime.addTime(pumpOffPeriod);
+			pumpSwitchStopTime += (60 * pumpOffPeriod);
 			switchPeriph(Periphs::PUMP, true);
 
 			// Включаем таймер для проверки статуса поплавкого уровня внутри камеры
-			pumpNextCheckTime = currentTime; 
-			pumpNextCheckTime.addTime(kMaxTimeForFullFlood);
+			pumpNextCheckTime = currentUnixTime + kMaxTimeForFullFlood; 
 			pumpCheckNeeded = true;
 		} else {
-			pumpSwitchStopTime.addTime(pumpOnPeriod);
+			pumpSwitchStopTime += (60 * pumpOnPeriod);
 			switchPeriph(Periphs::PUMP, false);
 		}
 	}
 
-	if ((currentTime > pumpNextCheckTime) && pumpCheckNeeded) {
+	if ((currentUnixTime > pumpNextCheckTime) && pumpCheckNeeded) {
 		if (!digitalRead(kFloatLevelPin)) {
 			pumpCheckNeeded = false; // Основная камера затоплена за требуемое время, все в порядке
 		} else {
@@ -396,8 +397,6 @@ void displayProcedure()
 {
 	String str1;
 	String str2;
-	String str3;
-	String str4;
 	DateTime now = rtc.now();
 
 	switch(displayMode){
@@ -463,19 +462,11 @@ void displayProcedure()
 		case DisplayModes::STATUS:
 			str1 = "Current Ver";
 			str2 = kSWVersion;
-			str3 = "next P switch ";
-			str3 += pumpSwitchStopTime.hour();
-			str3 += ":";
-			str3 += pumpSwitchStopTime.minute();
-
 			display.clearDisplay();
 			display.setCursor(0, 0);
 			display.print(str1);
 			display.setCursor(0, 18);
 			display.print(str2);
-			display.setCursor(0, 24);
-			display.print(str3);
-			display.display();
 			break;
 		case DisplayModes::SET_CUR_TIME:
 			str1 = "Set Cur time";
@@ -561,10 +552,10 @@ void setup()
 	
 	DateTime now = rtc.now();
 	TimeContainer currentTime{now.hour(), now.minute(), now.second()};
+	uint32_t currentUnixTime{now.unixtime()};
 
-	pumpSwitchStartTime = currentTime;
-	pumpSwitchStopTime = currentTime;
-	pumpSwitchStopTime.addTime(pumpOffPeriod);
+	pumpSwitchStartTime = currentUnixTime;
+	pumpSwitchStopTime = currentUnixTime + (60 * pumpOffPeriod);
 }
 
 void loop()
