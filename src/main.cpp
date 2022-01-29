@@ -14,7 +14,8 @@ email: vlladimirka@gmail.com
 - Добавление датчиков протечки на узлы, которые в теории могут потечь
 - Добавление зуммера для дополнительной индикации проблем в системе
 - Постоянное сохранение всех параметров системы в FRAM память
-- Перенести работу насоса так же в unixtime
+- Перенести работу лампы так же в unixtime
+- Первая инициализация через зажатие кнопки при включении
 
 и т.д.
 */
@@ -65,9 +66,9 @@ struct EepromData{
 	TimeContainerMinimal lampOffTime;
 };
 
-static constexpr char kSWVersion[]{"0.4"}; // Текущая версия прошивки
+static constexpr char kSWVersion[]{"0.5"}; // Текущая версия прошивки
 static constexpr unsigned long kDisplayUpdateTime{300}; // Время обновления информации на экране
-static constexpr unsigned long kRTCReadTime{300}; // Период опроса RTC
+static constexpr unsigned long kRTCReadTime{1000}; // Период опроса RTC
 static constexpr uint8_t kMaxPumpPeriod{60}; // Максимальная длительность периода залива-отливав в минутах
 static constexpr uint8_t kMaxTimeForFullFlood{60}; // Максимальная длительность работы насоса для полного затопления камеры в секундах
 
@@ -76,7 +77,7 @@ static constexpr uint8_t kGreenLedPin{7};
 static constexpr uint8_t kBlueLedPin{6};
 static constexpr uint8_t kPumpPin{12};
 static constexpr uint8_t kLampPin{13};
-static constexpr uint8_t kFloatLevelPin{11};
+static constexpr uint8_t kFloatLevelPin{8};
 
 static constexpr uint8_t kEncKeyPin{4};
 static constexpr uint8_t kEncS2Pin{2};
@@ -86,8 +87,7 @@ Adafruit_SSD1306 display(7);
 EncButton<EB_CALLBACK, kEncS1Pin, kEncS2Pin ,kEncKeyPin> encoder(INPUT_PULLUP);
 
 RTC_DS3231 rtc;
-uint32_t pumpSwitchStartTime{0};
-uint32_t pumpSwitchStopTime{0};
+uint32_t pumpNextSwitchTime{0};
 uint32_t pumpNextCheckTime{0};
 
 TimeContainer lampOnTime{0,0};
@@ -303,12 +303,10 @@ void switchPeriph(Periphs aPeriph, bool aMode)
 		digitalWrite(kPumpPin, aMode);
 		switchPeriph(Periphs::BLUELED, aMode); // Рекурсивно
 		pumpState = aMode;
-		Serial.print("Pump state now is " + aMode);
 		break;
 		case Periphs::LAMP:
 		digitalWrite(kLampPin, aMode);
 		lampState = aMode;
-		Serial.print("Lamp state now is " + aMode);
 		break;
 		case Periphs::REDLED:
 		digitalWrite(kRedLedPin, aMode);
@@ -340,29 +338,30 @@ void handleError(ErrorTypes aType)
 void checkTime()
 {
 	DateTime now = rtc.now();
-	TimeContainer currentTime{now.hour(), now.minute(), now.second()}; // Остается для работы насоса по часам
-	uint32_t currentUnixTime{now.unixtime()};                          // Добавляется для правильного подсчета интервалов
+	TimeContainer currentTime{now.hour(), now.minute(), now.second()}; // Остается для работы лампы по часам
+	uint32_t currentUnixTime{now.unixtime()};                          // Добавляется для правильного подсчета интервалов работы насоса
 
 	// Проверим тайминги для насоса
-	if (!(currentUnixTime > pumpSwitchStartTime && currentUnixTime < pumpSwitchStopTime)) {
-		// Если мы вышли за диапазон работы - меняем режим
-		pumpSwitchStartTime = pumpSwitchStopTime;
+	if (currentUnixTime > pumpNextSwitchTime) {
+		// Если пришло время переключения - переключаем
 
-		if (pumpState) {
-			pumpSwitchStopTime += (60 * pumpOffPeriod);
+		if (!pumpState) {
+			pumpNextSwitchTime += (60 * pumpOnPeriod);
 			switchPeriph(Periphs::PUMP, true);
+			Serial.println("pump on!");
 
 			// Включаем таймер для проверки статуса поплавкого уровня внутри камеры
 			pumpNextCheckTime = currentUnixTime + kMaxTimeForFullFlood; 
 			pumpCheckNeeded = true;
 		} else {
-			pumpSwitchStopTime += (60 * pumpOnPeriod);
+			pumpNextSwitchTime += (60 * pumpOffPeriod);
 			switchPeriph(Periphs::PUMP, false);
+			Serial.println("pump off!");
 		}
 	}
 
 	if ((currentUnixTime > pumpNextCheckTime) && pumpCheckNeeded) {
-		if (!digitalRead(kFloatLevelPin)) {
+		if (digitalRead(kFloatLevelPin)) {
 			pumpCheckNeeded = false; // Основная камера затоплена за требуемое время, все в порядке
 		} else {
 			handleError(ErrorTypes::LOW_WATERLEVEL); // Что-то пошло не так
@@ -530,7 +529,7 @@ void displayProcedure()
 
 void firstInit() // Вызывать один раз для того, чтобы перезаписать мусор в EEPROM
 {
-	rtc.adjust(DateTime(2022, 1, 22, 16, 35, 0));
+	rtc.adjust(DateTime(2022, 1, 29, 12, 00, 0));
 	lampOnTime.setTime(10, 10, 0);
 	lampOffTime.setTime(10, 10, 0);
 	pumpOnPeriod = 10;
@@ -554,8 +553,8 @@ void setup()
 	TimeContainer currentTime{now.hour(), now.minute(), now.second()};
 	uint32_t currentUnixTime{now.unixtime()};
 
-	pumpSwitchStartTime = currentUnixTime;
-	pumpSwitchStopTime = currentUnixTime + (60 * pumpOffPeriod);
+	pumpNextSwitchTime = currentUnixTime + (60 * pumpOffPeriod); // Начинаем цикл с положения выкл
+
 }
 
 void loop()
