@@ -8,7 +8,6 @@ email: vlladimirka@gmail.com
 ИЛИ ограничиться остановкой алгоритма по поплавковому уровню внутри бака
 
 Фичи, которые возможно будут реализованы:
-- Регулирование мощности насоса не отдельным ШИМ регулятором, а микроконтроллером
 - Добавление второго поплавкого уровня для бака
 - Добавление наблюдателя для контроля над выполнением основной программы
 - Добавление датчиков протечки на узлы, которые в теории могут потечь
@@ -54,6 +53,11 @@ enum class ErrorTypes {
 	POWEROFF
 };
 
+enum class HydroTypes {
+	NORMAL,
+	SWING,
+} hydroType;;
+
 struct TimeContainerMinimal {
 	uint8_t hours;
 	uint8_t minutes;
@@ -69,8 +73,9 @@ struct EepromData{
 static constexpr char kSWVersion[]{"0.5"}; // Текущая версия прошивки
 static constexpr unsigned long kDisplayUpdateTime{300}; // Время обновления информации на экране
 static constexpr unsigned long kRTCReadTime{1000}; // Период опроса RTC
-static constexpr uint8_t kMaxPumpPeriod{60}; // Максимальная длительность периода залива-отливав в минутах
+static constexpr uint8_t kMaxPumpPeriod{60}; // Максимальная длительность периода залива-отлива в минутах
 static constexpr uint8_t kMaxTimeForFullFlood{60}; // Максимальная длительность работы насоса для полного затопления камеры в секундах
+static constexpr uint8_t kSwingOffPeriod{10}; // Время состояния "качелей" выключено в секундах
 
 static constexpr uint8_t kRedLedPin{5};
 static constexpr uint8_t kGreenLedPin{7};
@@ -89,6 +94,7 @@ EncButton<EB_CALLBACK, kEncS1Pin, kEncS2Pin ,kEncKeyPin> encoder(INPUT_PULLUP);
 RTC_DS3231 rtc;
 uint32_t pumpNextSwitchTime{0};
 uint32_t pumpNextCheckTime{0};
+uint32_t pumpNextSwingTime{0};
 
 TimeContainer lampOnTime{0,0};
 TimeContainer lampOffTime{0,0};
@@ -101,6 +107,7 @@ uint64_t nextRTCReadTime{0};
 uint8_t currentPH{0};
 uint16_t currentPPM{0};
 
+bool swingState{false};
 bool pumpState{false};
 bool lampState{false};
 bool modeConf{false};
@@ -302,7 +309,7 @@ void switchPeriph(Periphs aPeriph, bool aMode)
 		case Periphs::PUMP:
 		digitalWrite(kPumpPin, aMode);
 		switchPeriph(Periphs::BLUELED, aMode); // Рекурсивно
-		pumpState = aMode;
+		//pumpState = aMode; Ушло в обработчик времени
 		break;
 		case Periphs::LAMP:
 		digitalWrite(kLampPin, aMode);
@@ -341,31 +348,78 @@ void checkTime()
 	TimeContainer currentTime{now.hour(), now.minute(), now.second()}; // Остается для работы лампы по часам
 	uint32_t currentUnixTime{now.unixtime()};                          // Добавляется для правильного подсчета интервалов работы насоса
 
-	// Проверим тайминги для насоса
-	if (currentUnixTime > pumpNextSwitchTime) {
-		// Если пришло время переключения - переключаем
+	switch (hydroType) {
+		case HydroTypes::NORMAL :{
+			// Нормальный режим - просто переключаем насос по интервалам
+			// Проверим тайминги для насоса
+			if (currentUnixTime > pumpNextSwitchTime) {
+			// Если пришло время переключения - переключаем
 
-		if (!pumpState) {
-			pumpNextSwitchTime += (60 * pumpOnPeriod);
-			switchPeriph(Periphs::PUMP, true);
-			Serial.println("pump on!");
+				if (!pumpState) {
+					pumpNextSwitchTime += (60 * pumpOnPeriod);
+					switchPeriph(Periphs::PUMP, true);
+					Serial.println("pump on!");
+					pumpState = true;
 
-			// Включаем таймер для проверки статуса поплавкого уровня внутри камеры
-			pumpNextCheckTime = currentUnixTime + kMaxTimeForFullFlood; 
-			pumpCheckNeeded = true;
-		} else {
-			pumpNextSwitchTime += (60 * pumpOffPeriod);
-			switchPeriph(Periphs::PUMP, false);
-			Serial.println("pump off!");
-		}
-	}
+					// Включаем таймер для проверки статуса поплавкого уровня внутри камеры
+					pumpNextCheckTime = currentUnixTime + kMaxTimeForFullFlood; 
+					pumpCheckNeeded = true;
+				} else {
+					pumpNextSwitchTime += (60 * pumpOffPeriod);
+					switchPeriph(Periphs::PUMP, false);
+					Serial.println("pump off!");
+					pumpState = false;
+				}
+			}
 
-	if ((currentUnixTime > pumpNextCheckTime) && pumpCheckNeeded) {
-		if (digitalRead(kFloatLevelPin)) {
-			pumpCheckNeeded = false; // Основная камера затоплена за требуемое время, все в порядке
-		} else {
-			handleError(ErrorTypes::LOW_WATERLEVEL); // Что-то пошло не так
-		}
+			if ((currentUnixTime > pumpNextCheckTime) && pumpCheckNeeded) {
+				if (digitalRead(kFloatLevelPin)) {
+					pumpCheckNeeded = false; // Основная камера затоплена за требуемое время, все в порядке
+				} else {
+					handleError(ErrorTypes::LOW_WATERLEVEL); // Что-то пошло не так
+				}
+			}
+
+		} // HydroTypes::Normal
+		case HydroTypes::SWING :{
+			// Видоизмененный нормальный режим. В период затопления насос активен не все время,
+			// он выключается по срабатыванию поплавкового уровня в камере и включается по таймауту
+			if (currentUnixTime > pumpNextSwitchTime) {
+				// Переключаем режимы так же как в нормальном но не трогаем сам насос
+				if (!pumpState) {
+					pumpNextSwitchTime += (60 * pumpOnPeriod);
+					pumpState = true;
+				} else {
+					pumpNextSwitchTime += (60 * pumpOffPeriod);
+					pumpState = false;
+				}
+			}
+
+			if (!pumpState) {
+				switchPeriph(Periphs::PUMP, false); // Если насос не включен - то определенно он должен быть выключен
+			} else {
+				// Если насос включен - начинаем "качели"
+				if (!swingState && currentUnixTime > pumpNextSwingTime) { // Если доп флаг насоса выключен и время для переключения пришло
+					switchPeriph(Periphs::PUMP, true); // включаем насос
+					pumpNextCheckTime = currentUnixTime + kMaxTimeForFullFlood; // Добавляем проверку на возможность затопления
+					pumpCheckNeeded = true; //активируем проверку
+					swingState = true;
+
+				}
+				
+				if (digitalRead(kFloatLevelPin) && swingState == true) {
+					// Если концевик сработал
+					switchPeriph(Periphs::PUMP, false); // выключим насос
+					pumpNextSwingTime = currentUnixTime + kSwingOffPeriod; // Заведем таймер на интервал ожидания
+					swingState = false;
+					pumpCheckNeeded = false;
+				} else if (pumpCheckNeeded && currentUnixTime > pumpNextCheckTime) {
+					// Если оно долго не сбрасывалось - значит что-то пошло не так
+					handleError(ErrorTypes::LOW_WATERLEVEL);
+				}
+			}
+			break;
+		} // HydroTypes::Swing
 	}
 
 	// Проверим тайминги для лампы
@@ -554,6 +608,7 @@ void setup()
 	uint32_t currentUnixTime{now.unixtime()};
 
 	pumpNextSwitchTime = currentUnixTime + (60 * pumpOffPeriod); // Начинаем цикл с положения выкл
+	hydroType = HydroTypes::SWING; // TODO Перенести в первичный инцициализатор
 
 }
 
