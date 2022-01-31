@@ -36,7 +36,8 @@ enum class DisplayModes : uint8_t {
 	SET_CUR_TIME       = 6,
 	SET_LAMPON_TIME    = 7,
 	SET_LAMPOFF_TIME   = 8,
-	SET_PUMP_TIME      = 9
+	SET_PUMP_TIME      = 9,
+	SET_SWING_PERIOD   = 10
 } displayMode;
 
 enum class Periphs {
@@ -68,6 +69,7 @@ struct EepromData{
 	uint8_t pumpOffPeriod;
 	TimeContainerMinimal lampOnTime;
 	TimeContainerMinimal lampOffTime;
+	uint8_t swingOffPeriod;
 };
 
 static constexpr char kSWVersion[]{"0.5"}; // Текущая версия прошивки
@@ -75,8 +77,7 @@ static constexpr unsigned long kDisplayUpdateTime{300}; // Время обнов
 static constexpr unsigned long kRTCReadTime{1000}; // Период опроса RTC
 static constexpr uint8_t kMaxPumpPeriod{60}; // Максимальная длительность периода залива-отлива в минутах
 static constexpr uint8_t kMaxTimeForFullFlood{60}; // Максимальная длительность работы насоса для полного затопления камеры в секундах
-static constexpr uint8_t kSwingOffPeriod{10}; // Время состояния "качелей" выключено в секундах
-
+static constexpr uint8_t kMaxSwingPeriod{30}; // Максимальный период раскачивания в секундах
 static constexpr uint8_t kRedLedPin{5};
 static constexpr uint8_t kGreenLedPin{7};
 static constexpr uint8_t kBlueLedPin{6};
@@ -99,6 +100,7 @@ uint32_t pumpNextSwingTime{0};
 TimeContainer lampOnTime{0,0};
 TimeContainer lampOffTime{0,0};
 
+uint8_t swingOffPeriod{0}; // Время состояния "качелей" выключено в секундах
 uint8_t pumpOnPeriod{0};
 uint8_t pumpOffPeriod{0};
 uint64_t nextDisplayTime{0};
@@ -199,6 +201,13 @@ void encoderInit()
 						pumpOnPeriod = 0;
 					}
 					break;
+				case DisplayModes::SET_SWING_PERIOD:
+					if (swingOffPeriod < kMaxSwingPeriod) {
+						++swingOffPeriod;
+					} else {
+						swingOffPeriod = 0;
+					}
+					break;
 				default:
 					break;	
 			}
@@ -258,6 +267,13 @@ void encoderInit()
 						pumpOffPeriod = 0;
 					}
 					break;
+				case DisplayModes::SET_SWING_PERIOD:
+					if (swingOffPeriod > 0) {
+						--swingOffPeriod;
+					} else {
+						swingOffPeriod = kMaxSwingPeriod;
+					}
+					break;
 				default:
 					break;	
 			}
@@ -278,10 +294,13 @@ void encoderInit()
 					displayMode = DisplayModes::SET_PUMP_TIME;
 					break;
 				case DisplayModes::SET_PUMP_TIME:
+					displayMode = DisplayModes::SET_SWING_PERIOD;
+					break;
+				case DisplayModes::SET_SWING_PERIOD:
 					displayMode = DisplayModes::SET_CUR_TIME;
 					break;
 				default:
-				break;
+					break;
 			}
 		}
 	});
@@ -388,10 +407,12 @@ void checkTime()
 				// Переключаем режимы так же как в нормальном но не трогаем сам насос
 				if (!pumpState) {
 					pumpNextSwitchTime += (60 * pumpOnPeriod);
+					Serial.println("pump swing enable!");
 					pumpState = true;
 				} else {
 					pumpNextSwitchTime += (60 * pumpOffPeriod);
 					pumpState = false;
+					Serial.println("pump off!");
 				}
 			}
 
@@ -404,15 +425,17 @@ void checkTime()
 					pumpNextCheckTime = currentUnixTime + kMaxTimeForFullFlood; // Добавляем проверку на возможность затопления
 					pumpCheckNeeded = true; //активируем проверку
 					swingState = true;
-
+					Serial.println("swing on!");
 				}
 				
 				if (digitalRead(kFloatLevelPin) && swingState == true) {
 					// Если концевик сработал
-					switchPeriph(Periphs::PUMP, false); // выключим насос
-					pumpNextSwingTime = currentUnixTime + kSwingOffPeriod; // Заведем таймер на интервал ожидания
+					switchPeriph(Periphs::PUMP, false); // Выключим насос
+					pumpNextSwingTime = currentUnixTime + swingOffPeriod; // Заведем таймер на интервал ожидания
 					swingState = false;
 					pumpCheckNeeded = false;
+					Serial.println("swing off!");
+					
 				} else if (pumpCheckNeeded && currentUnixTime > pumpNextCheckTime) {
 					// Если оно долго не сбрасывалось - значит что-то пошло не так
 					handleError(ErrorTypes::LOW_WATERLEVEL);
@@ -438,11 +461,12 @@ void eepromRead()
 	pumpOffPeriod = data.pumpOffPeriod;
 	lampOnTime.setTime(data.lampOnTime.hours, data.lampOnTime.minutes, 0);
 	lampOffTime.setTime(data.lampOffTime.hours, data.lampOffTime.minutes, 0);
+	swingOffPeriod = data.swingOffPeriod;
 }
 
 void eepromWrite()
 {
-	EepromData data{pumpOnPeriod, pumpOffPeriod, {lampOnTime.hour(), lampOnTime.minute()}, {lampOffTime.hour(), lampOffTime.minute()}};
+	EepromData data{pumpOnPeriod, pumpOffPeriod, {lampOnTime.hour(), lampOnTime.minute()}, {lampOffTime.hour(), lampOffTime.minute()}, swingOffPeriod};
 	eeprom_update_block(static_cast<void*>(&data), 0, sizeof(data));
 }
 
@@ -577,6 +601,18 @@ void displayProcedure()
 			display.setCursor(0, 18);
 			display.print(str2);
 			display.display();
+			break;
+		case DisplayModes::SET_SWING_PERIOD:
+			str1 = "Swing period";
+			str2 = swingOffPeriod;
+			display.clearDisplay();
+			display.setCursor(0, 0);
+			display.print(str1);
+			display.setCursor(0, 18);
+			display.print(str2);
+			display.display();
+			break;
+		default:
 			break;
 	}		
 }
