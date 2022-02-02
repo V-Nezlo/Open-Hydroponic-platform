@@ -6,7 +6,7 @@
 //
 
 // Класс для удобной работы со временем
-// Операторы < и > сделаны с учетом того, что разница между операндами не больше 60 минут
+// Операторы < и > сделаны без учета перехода времени через ноль
 // TODO: Переписать
 
 class TimeContainer {
@@ -37,25 +37,11 @@ public:
 
 	bool operator < (const TimeContainer &cont1) const&
 	{
-		uint8_t hour1{0};
-		uint8_t hour2{0};
-
-		if (_hours == 0 && cont1._hours != 0) {
-			hour1 = _hours + 12;
-			hour2 = cont1._hours - 12;
-		} else if (cont1._hours == 0 && _hours != 0) {
-			hour1 = _hours - 12;
-			hour2 = cont1._hours + 12;
-		} else {
-			hour1 = _hours;
-			hour2 = cont1._hours;
-		}
-
-		if (hour1 < hour2) {
+		if (_hours < cont1._hours) {
 			return true;
-		} else if (hour1 > hour2) {
+		} else if (_hours > cont1._hours) {
 			return false;
-		} else if (hour1 == hour2) {
+		} else if (_hours == cont1._hours) {
 			if (_minutes < cont1._minutes) {
 				return true;
 			} else if (_minutes > cont1._minutes) {
@@ -68,29 +54,16 @@ public:
 				}
 			}
 		}
+		return false;
 	}
 
 	bool operator > (const TimeContainer &cont1) const&
 	{
-		uint8_t hour1{0};
-		uint8_t hour2{0};
-
-		if (_hours == 0 && cont1._hours != 0) {
-			hour1 = _hours + 12;
-			hour2 = cont1._hours - 12;
-		} else if (cont1._hours == 0 && _hours != 0) {
-			hour1 = _hours - 12;
-			hour2 = cont1._hours + 12;
-		} else {
-			hour1 = _hours;
-			hour2 = cont1._hours;
-		}
-
-		if (hour1 > hour2) {
+		if (_hours > cont1._hours) {
 			return true;
-		} else if (hour1 < hour2) {
+		} else if (_hours < cont1._hours) {
 			return false;
-		} else if (hour1 == hour2) {
+		} else if (_hours == cont1._hours) {
 			if (_minutes > cont1._minutes) {
 				return true;
 			} else if (_minutes < cont1._minutes) {
@@ -103,6 +76,7 @@ public:
 				}
 			}
 		}
+		return false;
 	}
 
 	void setTime(uint8_t aHour, uint8_t aMinutes, uint8_t aSeconds)

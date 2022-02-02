@@ -14,7 +14,7 @@ email: vlladimirka@gmail.com
 - Добавление зуммера для дополнительной индикации проблем в системе
 - Постоянное сохранение всех параметров системы в FRAM память
 - Перенести работу лампы так же в unixtime
-- Первая инициализация через зажатие кнопки при включении
+- Первая инициализация через зажатие кнопки при включении - сделано
 
 и т.д.
 */
@@ -23,21 +23,22 @@ email: vlladimirka@gmail.com
 #include <Adafruit_SSD1306.h>
 #include <EncButton.h>
 #include <Adafruit_GFX.h>
-#include <EEPROM.h>
+#include <avr/eeprom.h>
 #include <RTClib.h>
 #include "TimeContainer.hpp"
 
 enum class DisplayModes : uint8_t {
-	TIME               = 1,
-	PH_PPM             = 2,
-	PUMP_TIMINGS       = 3,
-	LAMP_TIMINGS       = 4,
-	STATUS             = 5,
-	SET_CUR_TIME       = 6,
-	SET_LAMPON_TIME    = 7,
-	SET_LAMPOFF_TIME   = 8,
-	SET_PUMP_TIME      = 9,
-	SET_SWING_PERIOD   = 10
+	TIME,
+	PH_PPM,
+	PUMP_TIMINGS,
+	LAMP_TIMINGS,
+	STATUS,
+	SET_CUR_TIME,
+	SET_LAMPON_TIME,
+	SET_LAMPOFF_TIME,
+	SET_PUMP_TIME,
+	SET_SWING_PERIOD,
+	SET_WORKMODE
 } displayMode;
 
 enum class Periphs {
@@ -70,9 +71,10 @@ struct EepromData{
 	TimeContainerMinimal lampOnTime;
 	TimeContainerMinimal lampOffTime;
 	uint8_t swingOffPeriod;
+	HydroTypes hydroType;
 };
 
-static constexpr char kSWVersion[]{"0.5"}; // Текущая версия прошивки
+static constexpr char kSWVersion[]{"0.6"}; // Текущая версия прошивки
 static constexpr unsigned long kDisplayUpdateTime{300}; // Время обновления информации на экране
 static constexpr unsigned long kRTCReadTime{1000}; // Период опроса RTC
 static constexpr uint8_t kMaxPumpPeriod{60}; // Максимальная длительность периода залива-отлива в минутах
@@ -130,7 +132,8 @@ void pinInit()
 	pinMode(kLampPin, OUTPUT);
 	pinMode(kFloatLevelPin, INPUT_PULLUP);
 	
-	// Пины для энкодера инициализируются внутри библиотеки Гайвера
+	// Пины для энкодера инициализируются внутри библиотеки Гайвера, кроме кнопки энкодера
+	pinMode(kEncKeyPin, INPUT_PULLUP);
 }
 
 void oledInit()
@@ -208,6 +211,13 @@ void encoderInit()
 						swingOffPeriod = 0;
 					}
 					break;
+				case DisplayModes::SET_WORKMODE:
+					if (hydroType == HydroTypes::NORMAL) {
+						hydroType = HydroTypes::SWING;
+					} else {
+						hydroType = HydroTypes::NORMAL;
+					}
+					break;
 				default:
 					break;	
 			}
@@ -274,6 +284,13 @@ void encoderInit()
 						swingOffPeriod = kMaxSwingPeriod;
 					}
 					break;
+				case DisplayModes::SET_WORKMODE:
+					if (hydroType == HydroTypes::NORMAL) {
+						hydroType = HydroTypes::SWING;
+					} else {
+						hydroType = HydroTypes::NORMAL;
+					}
+					break;
 				default:
 					break;	
 			}
@@ -294,7 +311,15 @@ void encoderInit()
 					displayMode = DisplayModes::SET_PUMP_TIME;
 					break;
 				case DisplayModes::SET_PUMP_TIME:
-					displayMode = DisplayModes::SET_SWING_PERIOD;
+					displayMode = DisplayModes::SET_WORKMODE;
+					break;
+				case DisplayModes::SET_WORKMODE:
+					if (hydroType == HydroTypes::SWING) {
+						displayMode = DisplayModes::SET_SWING_PERIOD;
+					} else {
+						displayMode = DisplayModes::SET_CUR_TIME;
+					}
+
 					break;
 				case DisplayModes::SET_SWING_PERIOD:
 					displayMode = DisplayModes::SET_CUR_TIME;
@@ -316,10 +341,7 @@ void encoderInit()
 			modeConf = true;
 			displayMode = DisplayModes::SET_CUR_TIME;
 		}
-
 	});
-
-
 }
 
 void switchPeriph(Periphs aPeriph, bool aMode)
@@ -462,19 +484,34 @@ void eepromRead()
 	lampOnTime.setTime(data.lampOnTime.hours, data.lampOnTime.minutes, 0);
 	lampOffTime.setTime(data.lampOffTime.hours, data.lampOffTime.minutes, 0);
 	swingOffPeriod = data.swingOffPeriod;
+	hydroType = data.hydroType;
 }
 
 void eepromWrite()
 {
-	EepromData data{pumpOnPeriod, pumpOffPeriod, {lampOnTime.hour(), lampOnTime.minute()}, {lampOffTime.hour(), lampOffTime.minute()}, swingOffPeriod};
+	EepromData data{pumpOnPeriod, pumpOffPeriod, {lampOnTime.hour(), lampOnTime.minute()}, {lampOffTime.hour(), lampOffTime.minute()}, 
+		swingOffPeriod, hydroType};
 	eeprom_update_block(static_cast<void*>(&data), 0, sizeof(data));
+}
+
+String getHydroTypeName()
+{
+	switch (hydroType) {
+		case HydroTypes::NORMAL:
+			return "Normal";
+			break;
+		case HydroTypes::SWING:
+			return "Normal-swing";
+			break;
+	}
+	return "Unknown";
 }
 
 void displayProcedure()
 {
 	String str1;
 	String str2;
-	DateTime now = rtc.now();
+	DateTime now{rtc.now()};
 
 	switch(displayMode){
 		case DisplayModes::TIME:
@@ -612,18 +649,30 @@ void displayProcedure()
 			display.print(str2);
 			display.display();
 			break;
+		case DisplayModes::SET_WORKMODE:
+			str1 = "Work Mode is:";
+			str2 = getHydroTypeName();
+			display.clearDisplay();
+			display.setCursor(0, 0);
+			display.print(str1);
+			display.setCursor(0, 18);
+			display.print(str2);
+			display.display();
+			break;
 		default:
 			break;
 	}		
 }
 
-void firstInit() // Вызывать один раз для того, чтобы перезаписать мусор в EEPROM
+void firstInit()
 {
-	rtc.adjust(DateTime(2022, 1, 29, 12, 00, 0));
+	rtc.adjust(DateTime(__DATE__, __TIME__)); // Заберем время из системы во время компиляции
 	lampOnTime.setTime(10, 10, 0);
 	lampOffTime.setTime(10, 10, 0);
 	pumpOnPeriod = 10;
 	pumpOffPeriod = 10;
+	swingOffPeriod = 10;
+	hydroType = HydroTypes::SWING;
 }
 
 
@@ -633,19 +682,22 @@ void setup()
 	Serial.begin(115200);
 	rtc.begin();
 	pinInit();
+
+	if (!digitalRead(kEncKeyPin)) {
+		firstInit();
+	}
+
 	encoderInit();
 	oledInit();
 	eepromRead();
 	switchPeriph(Periphs::GREENLED, true);
 	displayMode = DisplayModes::TIME;
 	
-	DateTime now = rtc.now();
+	DateTime now{rtc.now()};
 	TimeContainer currentTime{now.hour(), now.minute(), now.second()};
 	uint32_t currentUnixTime{now.unixtime()};
 
 	pumpNextSwitchTime = currentUnixTime + (60 * pumpOffPeriod); // Начинаем цикл с положения выкл
-	hydroType = HydroTypes::SWING; // TODO Перенести в первичный инцициализатор
-
 }
 
 void loop()
@@ -654,7 +706,7 @@ void loop()
 
 	uint64_t currentTime = millis();
 	if (currentTime - nextDisplayTime >= kDisplayUpdateTime) {
-		nextDisplayTime =currentTime;
+		nextDisplayTime = currentTime;
 		displayProcedure();
 	}
 
