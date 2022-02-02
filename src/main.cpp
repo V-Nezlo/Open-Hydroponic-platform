@@ -201,14 +201,14 @@ void encoderInit()
 					if (pumpOnPeriod < kMaxPumpPeriod) {
 						++pumpOnPeriod;
 					} else {
-						pumpOnPeriod = 0;
+						pumpOnPeriod = 1;
 					}
 					break;
 				case DisplayModes::SET_SWING_PERIOD:
 					if (swingOffPeriod < kMaxSwingPeriod) {
 						++swingOffPeriod;
 					} else {
-						swingOffPeriod = 0;
+						swingOffPeriod = 1;
 					}
 					break;
 				case DisplayModes::SET_WORKMODE:
@@ -274,11 +274,11 @@ void encoderInit()
 					if (pumpOffPeriod < kMaxPumpPeriod) {
 						++pumpOffPeriod;
 					} else {
-						pumpOffPeriod = 0;
+						pumpOffPeriod = 1;
 					}
 					break;
 				case DisplayModes::SET_SWING_PERIOD:
-					if (swingOffPeriod > 0) {
+					if (swingOffPeriod > 1) {
 						--swingOffPeriod;
 					} else {
 						swingOffPeriod = kMaxSwingPeriod;
@@ -331,7 +331,7 @@ void encoderInit()
 	});
 	encoder.attach(HOLD_HANDLER, [](){
 		// Лямбда с обработчиком длинных нажатий энкодера
-		encoder.setHoldTimeout(1500);
+		encoder.setHoldTimeout(1000);
 
 		if (modeConf) {
 			modeConf = false;
@@ -350,7 +350,6 @@ void switchPeriph(Periphs aPeriph, bool aMode)
 		case Periphs::PUMP:
 		digitalWrite(kPumpPin, aMode);
 		switchPeriph(Periphs::BLUELED, aMode); // Рекурсивно
-		//pumpState = aMode; Ушло в обработчик времени
 		break;
 		case Periphs::LAMP:
 		digitalWrite(kLampPin, aMode);
@@ -667,15 +666,13 @@ void displayProcedure()
 void firstInit()
 {
 	rtc.adjust(DateTime(__DATE__, __TIME__)); // Заберем время из системы во время компиляции
-	lampOnTime.setTime(10, 10, 0);
-	lampOffTime.setTime(10, 10, 0);
-	pumpOnPeriod = 10;
+	lampOnTime.setTime(7, 0);
+	lampOffTime.setTime(23, 30);
+	pumpOnPeriod = 15;
 	pumpOffPeriod = 10;
 	swingOffPeriod = 10;
 	hydroType = HydroTypes::SWING;
 }
-
-
 
 void setup()
 {
@@ -694,7 +691,6 @@ void setup()
 	displayMode = DisplayModes::TIME;
 	
 	DateTime now{rtc.now()};
-	TimeContainer currentTime{now.hour(), now.minute(), now.second()};
 	uint32_t currentUnixTime{now.unixtime()};
 
 	pumpNextSwitchTime = currentUnixTime + (60 * pumpOffPeriod); // Начинаем цикл с положения выкл

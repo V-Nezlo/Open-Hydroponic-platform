@@ -79,7 +79,7 @@ public:
 		return false;
 	}
 
-	void setTime(uint8_t aHour, uint8_t aMinutes, uint8_t aSeconds)
+	void setTime(uint8_t aHour, uint8_t aMinutes, uint8_t aSeconds = 0)
 	{
 	    _hours = aHour;
 	    _minutes = aMinutes;
