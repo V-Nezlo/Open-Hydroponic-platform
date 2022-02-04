@@ -345,9 +345,11 @@ void encoderInit()
 
 
 	});
+
+	encoder.setHoldTimeout(1000);
+
 	encoder.attach(HOLD_HANDLER, [](){
 		// Лямбда с обработчиком длинных нажатий энкодера
-		encoder.setHoldTimeout(1000);
 
 		if (modeConf) {
 			modeConf = false;
@@ -365,7 +367,6 @@ void switchPeriph(Periphs aPeriph, bool aMode)
 	switch(aPeriph) {
 		case Periphs::PUMP:
 			digitalWrite(kPumpPin, aMode);
-			switchPeriph(Periphs::BLUELED, aMode); // Рекурсивно
 			break;
 		case Periphs::LAMP:
 			digitalWrite(kLampPin, aMode);
@@ -397,6 +398,7 @@ void handleError(ErrorTypes aType)
 	switch (aType) {
 		case ErrorTypes::LOW_WATERLEVEL: // Если емкость не заполнена за нужное время - рубим все, включаем красный светодиод и уходим в вечное ожидание
 			switchPeriph(Periphs::REDLED, true);
+			switchPeriph(Periphs::GREENLED, false);
 			switchPeriph(Periphs::PUMP, false);
 			switchPeriph(Periphs::LAMP, false);
 			while (true) {} // Пока что это критическая ошибка и ее возникновение говорит о потопе, используется только в NORMAL режиме
@@ -428,6 +430,7 @@ void checkTime()
 				if (!pumpState) {
 					pumpNextSwitchTime += (60 * pumpOnPeriod);
 					switchPeriph(Periphs::PUMP, true);
+					switchPeriph(Periphs::BLUELED, true);
 					Serial.println("pump on!");
 					pumpState = true;
 
@@ -437,6 +440,7 @@ void checkTime()
 				} else {
 					pumpNextSwitchTime += (60 * pumpOffPeriod);
 					switchPeriph(Periphs::PUMP, false);
+					switchPeriph(Periphs::BLUELED, false);
 					Serial.println("pump off!");
 					pumpState = false;
 				}
@@ -449,7 +453,7 @@ void checkTime()
 					handleError(ErrorTypes::LOW_WATERLEVEL); // Что-то пошло не так
 				}
 			}
-
+			break;
 		} // HydroTypes::Normal
 		case HydroTypes::SWING :{
 			// Видоизмененный нормальный режим. В период затопления насос активен не все время,
@@ -460,10 +464,12 @@ void checkTime()
 					pumpNextSwitchTime += (60 * pumpOnPeriod);
 					Serial.println("pump swing enable!");
 					pumpState = true;
+					switchPeriph(Periphs::BLUELED, true);
 				} else {
 					pumpNextSwitchTime += (60 * pumpOffPeriod);
 					pumpState = false;
 					Serial.println("pump off!");
+					switchPeriph(Periphs::BLUELED, false);
 				}
 			}
 
@@ -743,14 +749,14 @@ void setup()
 	Serial.begin(115200);
 	rtc.begin();
 	pinInit();
+	eepromRead(); // Сначала вспомнили из еепром
 
-	if (!digitalRead(kEncKeyPin)) {
+	if (!digitalRead(kEncKeyPin)) { // потом если надо залили сверху
 		firstInit();
 	}
 
 	encoderInit();
 	oledInit();
-	eepromRead();
 	switchPeriph(Periphs::GREENLED, true);
 	displayMode = DisplayModes::TIME;
 	
