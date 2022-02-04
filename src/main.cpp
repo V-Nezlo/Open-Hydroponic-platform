@@ -4,19 +4,19 @@ email: vlladimirka@gmail.com
 Дата создания проекта - 10.12.2021
 
 Фичи, которые нужно реализовать:
- - Концевик на бак, без него во время замены жидности насос может включиться насухую,
-ИЛИ ограничиться остановкой алгоритма по поплавковому уровню внутри бака
+- Измерять уровень воды будем с помощью тензодатчика и измерения массы емкости с водой,
+поплавковый уровень это не серьезно
+
+УСТАРЕЛО
+(Концевик на бак, без него во время замены жидности насос может включиться насухую,
+ИЛИ ограничиться остановкой алгоритма по поплавковому уровню внутри бака)
 
 Фичи, которые возможно будут реализованы:
-- Добавление второго поплавкого уровня для бака
 - Добавление наблюдателя для контроля над выполнением основной программы
 - Добавление датчиков протечки на узлы, которые в теории могут потечь
-- Добавление зуммера для дополнительной индикации проблем в системе
 - Постоянное сохранение всех параметров системы в FRAM память
 - Перенести работу лампы так же в unixtime
-- Первая инициализация через зажатие кнопки при включении - сделано
 
-и т.д.
 */
 
 #include <Arduino.h>
@@ -46,13 +46,15 @@ enum class Periphs {
 	LAMP,
 	REDLED,
 	BLUELED,
-	GREENLED
+	GREENLED,
+	ZUMMER
 };
 
 enum class ErrorTypes {
 	LOW_WATERLEVEL,
 	LEAK,
-	POWEROFF
+	POWEROFF,
+	FLOATLEVEL_ERROR
 };
 
 enum class HydroTypes {
@@ -74,18 +76,21 @@ struct EepromData{
 	HydroTypes hydroType;
 };
 
-static constexpr char kSWVersion[]{"0.6"}; // Текущая версия прошивки
+static constexpr char kSWVersion[]{"0.7"}; // Текущая версия прошивки
 static constexpr unsigned long kDisplayUpdateTime{300}; // Время обновления информации на экране
 static constexpr unsigned long kRTCReadTime{1000}; // Период опроса RTC
 static constexpr uint8_t kMaxPumpPeriod{60}; // Максимальная длительность периода залива-отлива в минутах
 static constexpr uint8_t kMaxTimeForFullFlood{60}; // Максимальная длительность работы насоса для полного затопления камеры в секундах
 static constexpr uint8_t kMaxSwingPeriod{30}; // Максимальный период раскачивания в секундах
+static constexpr uint16_t kErrorBlinkingPeriod{500}; // Миллисекунды
+static constexpr uint8_t kErrorCleanPeriod{1}; // Время, по прошествии которого ошибка сбросится сама в минутах 
 static constexpr uint8_t kRedLedPin{5};
 static constexpr uint8_t kGreenLedPin{7};
 static constexpr uint8_t kBlueLedPin{6};
 static constexpr uint8_t kPumpPin{12};
 static constexpr uint8_t kLampPin{13};
 static constexpr uint8_t kFloatLevelPin{8};
+static constexpr uint8_t kZummerPin{9};
 
 static constexpr uint8_t kEncKeyPin{4};
 static constexpr uint8_t kEncS2Pin{2};
@@ -105,8 +110,10 @@ TimeContainer lampOffTime{0,0};
 uint8_t swingOffPeriod{0}; // Время состояния "качелей" выключено в секундах
 uint8_t pumpOnPeriod{0};
 uint8_t pumpOffPeriod{0};
-uint64_t nextDisplayTime{0};
-uint64_t nextRTCReadTime{0};
+uint32_t nextDisplayTime{0}; // Время следующего обновления экрана
+uint32_t nextRTCReadTime{0}; // Время следующего чтения RTC
+uint32_t nextErrorCleanTime{0}; // Время следующего сброса ошибки
+uint32_t nextErrorBlinkTime{0}; // Не unixTime а millis
 
 uint8_t currentPH{0};
 uint16_t currentPPM{0};
@@ -115,6 +122,8 @@ bool swingState{false};
 bool pumpState{false};
 bool lampState{false};
 bool modeConf{false};
+bool errorState{false};
+bool errorStatePos{false};
 
 // Флаги для разных проверок
 bool pumpCheckNeeded{false};
@@ -130,6 +139,7 @@ void pinInit()
 	pinMode(kGreenLedPin, OUTPUT);
 	pinMode(kPumpPin, OUTPUT);
 	pinMode(kLampPin, OUTPUT);
+	pinMode(kZummerPin, OUTPUT);
 	pinMode(kFloatLevelPin, INPUT_PULLUP);
 	
 	// Пины для энкодера инициализируются внутри библиотеки Гайвера, кроме кнопки энкодера
@@ -328,6 +338,12 @@ void encoderInit()
 					break;
 			}
 		}
+
+		if (errorState) {
+			errorState = false; // Сбросим флаг ошибки отсюда (временно)
+		}
+
+
 	});
 	encoder.attach(HOLD_HANDLER, [](){
 		// Лямбда с обработчиком длинных нажатий энкодера
@@ -348,37 +364,50 @@ void switchPeriph(Periphs aPeriph, bool aMode)
 {
 	switch(aPeriph) {
 		case Periphs::PUMP:
-		digitalWrite(kPumpPin, aMode);
-		switchPeriph(Periphs::BLUELED, aMode); // Рекурсивно
-		break;
+			digitalWrite(kPumpPin, aMode);
+			switchPeriph(Periphs::BLUELED, aMode); // Рекурсивно
+			break;
 		case Periphs::LAMP:
-		digitalWrite(kLampPin, aMode);
-		lampState = aMode;
-		break;
+			digitalWrite(kLampPin, aMode);
+			lampState = aMode;
+			break;
 		case Periphs::REDLED:
-		digitalWrite(kRedLedPin, aMode);
-		break;
+			digitalWrite(kRedLedPin, aMode);
+			break;
 		case Periphs::BLUELED:
-		digitalWrite(kBlueLedPin, aMode);
-		break;
+			digitalWrite(kBlueLedPin, aMode);
+			break;
 		case Periphs::GREENLED:
-		digitalWrite(kGreenLedPin, aMode);
-		break;
+			digitalWrite(kGreenLedPin, aMode);
+			break;
+		case Periphs::ZUMMER:
+			digitalWrite(kZummerPin, aMode);
+			break;
 	}
 }
 
 void handleError(ErrorTypes aType)
 {
+	DateTime now = rtc.now();
+	uint32_t currentUnixTime{now.unixtime()};
+
+	errorState = true; // Поставим флаг ошибки
+	nextErrorCleanTime = currentUnixTime + (60 * kErrorCleanPeriod);
+
 	switch (aType) {
 		case ErrorTypes::LOW_WATERLEVEL: // Если емкость не заполнена за нужное время - рубим все, включаем красный светодиод и уходим в вечное ожидание
 			switchPeriph(Periphs::REDLED, true);
 			switchPeriph(Periphs::PUMP, false);
 			switchPeriph(Periphs::LAMP, false);
-			while(true) {} //
+			while (true) {} // Пока что это критическая ошибка и ее возникновение говорит о потопе, используется только в NORMAL режиме
+			
 		case ErrorTypes::LEAK: // Если будет датчик протечки - он будет обрабатываться тут
-		break;
+			break;
 		case ErrorTypes::POWEROFF: // Если будет датчик наличия напряжения - он будет обрабатываться здесь
-		break;
+			break;
+		case ErrorTypes::FLOATLEVEL_ERROR: // Ошибка в работе поплавкового уровня
+			// Чисто в теории поплавковый уровень может "застрять", но что делать в таком случае я пока не придумал
+			break;
 	}
 }
 
@@ -387,6 +416,7 @@ void checkTime()
 	DateTime now = rtc.now();
 	TimeContainer currentTime{now.hour(), now.minute(), now.second()}; // Остается для работы лампы по часам
 	uint32_t currentUnixTime{now.unixtime()};                          // Добавляется для правильного подсчета интервалов работы насоса
+	uint32_t currentMillisTime{millis()};                              // А тут можно получить миллисекунды от мк
 
 	switch (hydroType) {
 		case HydroTypes::NORMAL :{
@@ -439,6 +469,7 @@ void checkTime()
 
 			if (!pumpState) {
 				switchPeriph(Periphs::PUMP, false); // Если насос не включен - то определенно он должен быть выключен
+				pumpCheckNeeded = false; // Этот флаг может не сброситься сам после окончания цикла, сбросим вручную
 			} else {
 				// Если насос включен - начинаем "качели"
 				if (!swingState && currentUnixTime > pumpNextSwingTime) { // Если доп флаг насоса выключен и время для переключения пришло
@@ -458,8 +489,13 @@ void checkTime()
 					Serial.println("swing off!");
 					
 				} else if (pumpCheckNeeded && currentUnixTime > pumpNextCheckTime) {
-					// Если оно долго не сбрасывалось - значит что-то пошло не так
-					handleError(ErrorTypes::LOW_WATERLEVEL);
+					// Если оно долго не сбрасывалось - значит что-то пошло не так, например застрял поплавковый уровень
+					switchPeriph(Periphs::PUMP, false); // Выключим насос
+					pumpNextSwingTime = currentUnixTime + swingOffPeriod; // Заведем таймер на интервал ожидания
+					swingState = false;
+					pumpCheckNeeded = false;
+					handleError(ErrorTypes::FLOATLEVEL_ERROR); // Поставим ошибку
+					Serial.println("swing off from timer, float level faillure");
 				}
 			}
 			break;
@@ -471,6 +507,34 @@ void checkTime()
 		switchPeriph(Periphs::LAMP, false);
 	} else {
 		switchPeriph(Periphs::LAMP, true);
+	}
+
+	// Проверим ошибки, но по таймеру, чтобы не мучать периферию
+	if (currentMillisTime > nextErrorBlinkTime + kErrorBlinkingPeriod) {
+
+		if (errorState) {
+			switchPeriph(Periphs::GREENLED, false); // Снимем зеленый светодиод, у нас ошибка
+
+			if (errorStatePos) {
+				switchPeriph(Periphs::REDLED, true);
+				switchPeriph(Periphs::ZUMMER, true);
+			} else {
+				switchPeriph(Periphs::REDLED, false);
+				switchPeriph(Periphs::ZUMMER, false);
+			}
+
+			errorStatePos = !errorStatePos;
+
+		} else {
+			switchPeriph(Periphs::REDLED, false);
+			switchPeriph(Periphs::ZUMMER, false);
+			switchPeriph(Periphs::GREENLED, true);
+		}
+	}
+
+	// Сбросим ошибку если пришло время ее сбросить
+	if (errorState && (currentUnixTime > nextErrorCleanTime)) {
+		errorState = false;
 	}
 }
 
@@ -700,7 +764,7 @@ void loop()
 {
 	encoder.tick();
 
-	uint64_t currentTime = millis();
+	uint32_t currentTime = millis();
 	if (currentTime - nextDisplayTime >= kDisplayUpdateTime) {
 		nextDisplayTime = currentTime;
 		displayProcedure();
