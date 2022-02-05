@@ -38,7 +38,8 @@ enum class DisplayModes : uint8_t {
 	SET_LAMPOFF_TIME,
 	SET_PUMP_TIME,
 	SET_SWING_PERIOD,
-	SET_WORKMODE
+	SET_WORKMODE,
+	ERROR_NOFLOATLEV
 } displayMode;
 
 enum class Periphs {
@@ -51,10 +52,9 @@ enum class Periphs {
 };
 
 enum class ErrorTypes {
-	LOW_WATERLEVEL,
-	LEAK,
-	POWEROFF,
-	FLOATLEVEL_ERROR
+	WARNING, // Предупреждение
+	ERROR, // Ошибка, нужно произвести какие то действия чтобы продолжить
+	CRITICAL // Критическая ошибка, выключение
 };
 
 enum class HydroTypes {
@@ -342,8 +342,6 @@ void encoderInit()
 		if (errorState) {
 			errorState = false; // Сбросим флаг ошибки отсюда (временно)
 		}
-
-
 	});
 
 	encoder.setHoldTimeout(1000);
@@ -396,19 +394,16 @@ void handleError(ErrorTypes aType)
 	nextErrorCleanTime = currentUnixTime + (60 * kErrorCleanPeriod);
 
 	switch (aType) {
-		case ErrorTypes::LOW_WATERLEVEL: // Если емкость не заполнена за нужное время - рубим все, включаем красный светодиод и уходим в вечное ожидание
+		case ErrorTypes::CRITICAL: 
 			switchPeriph(Periphs::REDLED, true);
 			switchPeriph(Periphs::GREENLED, false);
 			switchPeriph(Periphs::PUMP, false);
 			switchPeriph(Periphs::LAMP, false);
 			while (true) {} // Пока что это критическая ошибка и ее возникновение говорит о потопе, используется только в NORMAL режиме
 			
-		case ErrorTypes::LEAK: // Если будет датчик протечки - он будет обрабатываться тут
+		case ErrorTypes::ERROR: // Ошибка, требующая сброса
 			break;
-		case ErrorTypes::POWEROFF: // Если будет датчик наличия напряжения - он будет обрабатываться здесь
-			break;
-		case ErrorTypes::FLOATLEVEL_ERROR: // Ошибка в работе поплавкового уровня
-			// Чисто в теории поплавковый уровень может "застрять", но что делать в таком случае я пока не придумал
+		case ErrorTypes::WARNING: // Предупреждение
 			break;
 	}
 }
@@ -450,7 +445,7 @@ void checkTime()
 				if (digitalRead(kFloatLevelPin)) {
 					pumpCheckNeeded = false; // Основная камера затоплена за требуемое время, все в порядке
 				} else {
-					handleError(ErrorTypes::LOW_WATERLEVEL); // Что-то пошло не так
+					handleError(ErrorTypes::CRITICAL); // Что-то пошло не так
 				}
 			}
 			break;
@@ -464,6 +459,7 @@ void checkTime()
 					pumpNextSwitchTime += (60 * pumpOnPeriod);
 					Serial.println("pump swing enable!");
 					pumpState = true;
+					swingState = false;  //Начинаем с положения вкл
 					switchPeriph(Periphs::BLUELED, true);
 				} else {
 					pumpNextSwitchTime += (60 * pumpOffPeriod);
@@ -484,25 +480,23 @@ void checkTime()
 					pumpCheckNeeded = true; //активируем проверку
 					swingState = true;
 					Serial.println("swing on!");
-				}
-				
-				if (digitalRead(kFloatLevelPin) && swingState == true) {
+				} else if (digitalRead(kFloatLevelPin) && swingState == true) { // Если
 					// Если концевик сработал
 					switchPeriph(Periphs::PUMP, false); // Выключим насос
 					pumpNextSwingTime = currentUnixTime + swingOffPeriod; // Заведем таймер на интервал ожидания
-					swingState = false;
 					pumpCheckNeeded = false;
+					swingState = false;
+					//pumpCheckNeeded = false;
 					Serial.println("swing off!");
-					
 				} else if (pumpCheckNeeded && currentUnixTime > pumpNextCheckTime) {
 					// Если оно долго не сбрасывалось - значит что-то пошло не так, например застрял поплавковый уровень
 					switchPeriph(Periphs::PUMP, false); // Выключим насос
 					pumpNextSwingTime = currentUnixTime + swingOffPeriod; // Заведем таймер на интервал ожидания
 					swingState = false;
 					pumpCheckNeeded = false;
-					handleError(ErrorTypes::FLOATLEVEL_ERROR); // Поставим ошибку
+					handleError(ErrorTypes::ERROR); // Поставим ошибку
 					Serial.println("swing off from timer, float level faillure");
-				}
+				} 
 			}
 			break;
 		} // HydroTypes::Swing
@@ -650,6 +644,7 @@ void displayProcedure()
 			display.print(str1);
 			display.setCursor(0, 18);
 			display.print(str2);
+			display.display();
 			break;
 		case DisplayModes::SET_CUR_TIME:
 			str1 = "Set Cur time";
@@ -728,6 +723,16 @@ void displayProcedure()
 			display.print(str2);
 			display.display();
 			break;
+		case DisplayModes::ERROR_NOFLOATLEV:
+			str1 = "Float level error";
+			str2 = "Plug float level";
+			display.clearDisplay();
+			display.setCursor(0, 0);
+			display.print(str1);
+			display.setCursor(0, 18);
+			display.print(str2);
+			display.display();
+			break;
 		default:
 			break;
 	}		
@@ -758,8 +763,14 @@ void setup()
 	encoderInit();
 	oledInit();
 	switchPeriph(Periphs::GREENLED, true);
-	displayMode = DisplayModes::TIME;
-	
+
+	if (digitalRead(kFloatLevelPin)) { // Проверяем на старте есть ли поплавковый уровень в системе
+		displayMode = DisplayModes::ERROR_NOFLOATLEV; // Если нет - ошибка, без него работать нельзя, ошибка несбрасываемая
+		handleError(ErrorTypes::ERROR);
+	} else {
+		displayMode = DisplayModes::TIME; // Иначе включаемся
+	}
+
 	DateTime now{rtc.now()};
 	uint32_t currentUnixTime{now.unixtime()};
 
