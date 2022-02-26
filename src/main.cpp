@@ -39,7 +39,8 @@ enum class DisplayModes : uint8_t {
 	SET_PUMP_TIME,
 	SET_SWING_PERIOD,
 	SET_WORKMODE,
-	ERROR_NOFLOATLEV
+	ERROR_NOFLOATLEV,
+	SET_MAXFLOODTIME
 } displayMode;
 
 enum class Periphs {
@@ -74,14 +75,15 @@ struct EepromData{
 	TimeContainerMinimal lampOffTime;
 	uint8_t swingOffPeriod;
 	HydroTypes hydroType;
+	uint16_t maxTimeForFullFlood;
 };
 
 static constexpr char kSWVersion[]{"0.7"}; // Текущая версия прошивки
 static constexpr unsigned long kDisplayUpdateTime{300}; // Время обновления информации на экране
 static constexpr unsigned long kRTCReadTime{1000}; // Период опроса RTC
 static constexpr uint8_t kMaxPumpPeriod{60}; // Максимальная длительность периода залива-отлива в минутах
-static constexpr uint8_t kMaxTimeForFullFlood{60}; // Максимальная длительность работы насоса для полного затопления камеры в секундах
 static constexpr uint8_t kMaxSwingPeriod{30}; // Максимальный период раскачивания в секундах
+static constexpr uint16_t kMaxTimeForFlood{300}; // Максимально настраиваемое время заполнения камеры в секундах
 static constexpr uint16_t kErrorBlinkingPeriod{500}; // Миллисекунды
 static constexpr uint8_t kErrorCleanPeriod{1}; // Время, по прошествии которого ошибка сбросится сама в минутах 
 static constexpr uint8_t kRedLedPin{5};
@@ -110,6 +112,7 @@ TimeContainer lampOffTime{0,0};
 uint8_t swingOffPeriod{0}; // Время состояния "качелей" выключено в секундах
 uint8_t pumpOnPeriod{0};
 uint8_t pumpOffPeriod{0};
+uint16_t maxTimeForFullFlood{0};
 uint32_t nextDisplayTime{0}; // Время следующего обновления экрана
 uint32_t nextRTCReadTime{0}; // Время следующего чтения RTC
 uint32_t nextErrorCleanTime{0}; // Время следующего сброса ошибки
@@ -228,6 +231,13 @@ void encoderInit()
 						hydroType = HydroTypes::NORMAL;
 					}
 					break;
+				case DisplayModes::SET_MAXFLOODTIME:
+					if (maxTimeForFullFlood < kMaxTimeForFlood) {
+						++maxTimeForFullFlood;
+					} else {
+						maxTimeForFullFlood = 10;
+					}
+					break;
 				default:
 					break;	
 			}
@@ -301,6 +311,13 @@ void encoderInit()
 						hydroType = HydroTypes::NORMAL;
 					}
 					break;
+				case DisplayModes::SET_MAXFLOODTIME:
+					if (maxTimeForFullFlood > 1) {
+						--maxTimeForFullFlood;
+					} else {
+						maxTimeForFullFlood = kMaxTimeForFlood;
+					}
+					break;
 				default:
 					break;	
 			}
@@ -321,6 +338,9 @@ void encoderInit()
 					displayMode = DisplayModes::SET_PUMP_TIME;
 					break;
 				case DisplayModes::SET_PUMP_TIME:
+					displayMode = DisplayModes::SET_MAXFLOODTIME;
+					break;
+				case DisplayModes::SET_MAXFLOODTIME:
 					displayMode = DisplayModes::SET_WORKMODE;
 					break;
 				case DisplayModes::SET_WORKMODE:
@@ -430,7 +450,7 @@ void checkTime()
 					pumpState = true;
 
 					// Включаем таймер для проверки статуса поплавкого уровня внутри камеры
-					pumpNextCheckTime = currentUnixTime + kMaxTimeForFullFlood; 
+					pumpNextCheckTime = currentUnixTime + maxTimeForFullFlood; 
 					pumpCheckNeeded = true;
 				} else {
 					pumpNextSwitchTime += (60 * pumpOffPeriod);
@@ -476,7 +496,7 @@ void checkTime()
 				// Если насос включен - начинаем "качели"
 				if (!swingState && currentUnixTime > pumpNextSwingTime) { // Если доп флаг насоса выключен и время для переключения пришло
 					switchPeriph(Periphs::PUMP, true); // включаем насос
-					pumpNextCheckTime = currentUnixTime + kMaxTimeForFullFlood; // Добавляем проверку на возможность затопления
+					pumpNextCheckTime = currentUnixTime + maxTimeForFullFlood; // Добавляем проверку на возможность затопления
 					pumpCheckNeeded = true; //активируем проверку
 					swingState = true;
 					Serial.println("swing on!");
@@ -548,12 +568,13 @@ void eepromRead()
 	lampOffTime.setTime(data.lampOffTime.hours, data.lampOffTime.minutes, 0);
 	swingOffPeriod = data.swingOffPeriod;
 	hydroType = data.hydroType;
+	maxTimeForFullFlood = data.maxTimeForFullFlood;
 }
 
 void eepromWrite()
 {
 	EepromData data{pumpOnPeriod, pumpOffPeriod, {lampOnTime.hour(), lampOnTime.minute()}, {lampOffTime.hour(), lampOffTime.minute()}, 
-		swingOffPeriod, hydroType};
+		swingOffPeriod, hydroType, maxTimeForFullFlood};
 	eeprom_update_block(static_cast<void*>(&data), 0, sizeof(data));
 }
 
@@ -726,6 +747,16 @@ void displayProcedure()
 		case DisplayModes::ERROR_NOFLOATLEV:
 			str1 = "Float level error";
 			str2 = "Plug float level";
+			display.clearDisplay();
+			display.setCursor(0, 0);
+			display.print(str1);
+			display.setCursor(0, 18);
+			display.print(str2);
+			display.display();
+			break;
+		case DisplayModes::SET_MAXFLOODTIME:
+			str1 = "Max flood time";
+			str2 = maxTimeForFullFlood;
 			display.clearDisplay();
 			display.setCursor(0, 0);
 			display.print(str1);
