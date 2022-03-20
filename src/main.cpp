@@ -68,7 +68,7 @@ struct TimeContainerMinimal {
 	uint8_t minutes;
 };
 
-struct EepromData{
+struct EepromData {
 	uint8_t pumpOnPeriod;
 	uint8_t pumpOffPeriod;
 	TimeContainerMinimal lampOnTime;
@@ -76,6 +76,11 @@ struct EepromData{
 	uint8_t swingOffPeriod;
 	HydroTypes hydroType;
 	uint16_t maxTimeForFullFlood;
+};
+
+struct Statistics {
+	uint32_t successed; // Полных циклов (пока не используется)
+	uint32_t errors; // Ошибок
 };
 
 static constexpr char kSWVersion[]{"0.7"}; // Текущая версия прошивки
@@ -117,6 +122,7 @@ uint32_t nextDisplayTime{0}; // Время следующего обновлен
 uint32_t nextRTCReadTime{0}; // Время следующего чтения RTC
 uint32_t nextErrorCleanTime{0}; // Время следующего сброса ошибки
 uint32_t nextErrorBlinkTime{0}; // Не unixTime а millis
+uint32_t lastErrorTime{0}; // Время последней ошибки
 
 uint8_t currentPH{0};
 uint16_t currentPPM{0};
@@ -130,6 +136,7 @@ bool errorStatePos{false};
 
 // Флаги для разных проверок
 bool pumpCheckNeeded{false};
+Statistics statistics{0,0};
 //
 
 void eepromWrite();
@@ -412,6 +419,7 @@ void handleError(ErrorTypes aType)
 
 	errorState = true; // Поставим флаг ошибки
 	nextErrorCleanTime = currentUnixTime + (60 * kErrorCleanPeriod);
+	lastErrorTime = currentUnixTime;
 
 	switch (aType) {
 		case ErrorTypes::CRITICAL: 
@@ -422,6 +430,7 @@ void handleError(ErrorTypes aType)
 			while (true) {} // Пока что это критическая ошибка и ее возникновение говорит о потопе, используется только в NORMAL режиме
 			
 		case ErrorTypes::ERROR: // Ошибка, требующая сброса
+			++statistics.errors; // Инкремент счетчика ошибок
 			break;
 		case ErrorTypes::WARNING: // Предупреждение
 			break;
@@ -500,13 +509,13 @@ void checkTime()
 					pumpCheckNeeded = true; //активируем проверку
 					swingState = true;
 					Serial.println("swing on!");
-				} else if (digitalRead(kFloatLevelPin) && swingState == true) { // Если
+					
+				} else if (digitalRead(kFloatLevelPin) && swingState == true) {
 					// Если концевик сработал
 					switchPeriph(Periphs::PUMP, false); // Выключим насос
 					pumpNextSwingTime = currentUnixTime + swingOffPeriod; // Заведем таймер на интервал ожидания
 					pumpCheckNeeded = false;
 					swingState = false;
-					//pumpCheckNeeded = false;
 					Serial.println("swing off!");
 				} else if (pumpCheckNeeded && currentUnixTime > pumpNextCheckTime) {
 					// Если оно долго не сбрасывалось - значит что-то пошло не так, например застрял поплавковый уровень
@@ -658,8 +667,10 @@ void displayProcedure()
 			display.display();
 			break;
 		case DisplayModes::STATUS:
-			str1 = "Current Ver";
-			str2 = kSWVersion;
+			str1 = "Ver: ";
+			str1 += kSWVersion;
+			str2 = "Errors: ";
+			str2 += statistics.errors;
 			display.clearDisplay();
 			display.setCursor(0, 0);
 			display.print(str1);
